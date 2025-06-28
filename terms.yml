@@ -1,0 +1,51 @@
+# terms.yml
+required_blocks:
+  - Definition
+  - Parameter
+  - Ableitung
+  - Schlussfolgerung
+  - Stabilitätsbedingung
+  - Frequenzraum
+  - Raum-Zeit-Riss
+  - Zeitschalenstruktur
+  - Phasenmodell
+  - Referenzkette
+  - Visualisierung
+  - Abbildung
+  - Simulation
+
+critical_terms:
+  - τₙ
+  - αₙ
+  - f(αₙ)
+  - r_crit
+  - Makado-Frequenzraum
+  - Mikado-Modell
+  - Zeitschale
+  - Quantenschaum
+  - Raumriss
+  - Eigenzeit
+  - Entropiegradient
+  - Void
+  - Neutrinoschwarm
+  - Phasenübergang
+  - Ionisation
+  - Emulsion
+  - Supraleitung
+  - Temperaturdimension
+  - Überlappungsraum
+  - Zeitflussfaktor
+  - Makado-Riss
+  - Frequenzkollaps
+  - Raumfluss
+  - Badewannenmodell
+  - Mikado-Feld
+  - Resonanzkopplung
+  - Zeitschalenbruch
+  - Tunnelzustand
+  - Raumtemperatur
+  - Dichtegradient
+  - Referenzsprung
+  - Abbildung
+  - Abb.
+  - Simulation
