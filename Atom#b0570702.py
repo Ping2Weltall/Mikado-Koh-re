@@ -14,6 +14,10 @@ FPS              = 30
 
 INIT_FOAM        = 512
 INIT_NEUTRINO    = 0
+
+# --- NEUE REGEL: Maximale Anzahl von Elektronen, Magneten und ElektroMagnetimpulsen ---
+MAX_PARTICLES_SUM = 20  # Overall maximum for these specific particle types
+
 FOAM_RADIAL      = 360/60
 FOAM_TANG        = 3.0
 FOAM_GRAVITY     = -0.25
@@ -24,13 +28,16 @@ NEUTRINO_JIT     = 0.05
 DRAIN_RADIUS     = 50
 RIMZONEWIDTH     = 20
 BOWL_MARGIN      = 50
-FOAMTONEUTRINO_THRESHOLD = 5 # = 25
+FOAMTONEUTRINO_THRESHOLD = 5
 NEUTRINOTOELECTRON_THRESHOLD = 5
 
 MAGNET_SPREAD    = math.pi/1.1
 MAGNET_ROTATION_SPEED = 0.03  # Geschwindigkeit der Magnetbewegung
 MAGNET_RELEASE_PROB = 0.05    # Reduzierte Wahrscheinlichkeit, ein Foam freizugeben (für längere Lebensdauer)
 MAGNET_REPULSION_FORCE = 0.1  # Stärke der Abstoßung zwischen Magneten
+MAGNET_LIFETIME = 300         # Magnet remains active for some time steps (300 frames)
+ELECTROMAGNETIC_IMPULSE_SPEED = 5.0 # Speed of the new electromagnetic impulse
+ELECTROMAGNETIC_IMPULSE_JIT = 0.1 # Randomness in impulse movement due to quantum foam
 
 BG_COLOR         = (11, 11, 30)
 WALL_COLOR       = (200, 200, 200)
@@ -43,6 +50,7 @@ FOAM_COLOR       = (0, 200, 0)      # Grün
 NEUTRINO_COLOR   = (200, 0, 200)    # Magenta
 ELECTRON_COLOR   = (0, 200, 255)    # Cyan
 MAGNET_DIAG_COLOR= (80, 220, 255)   # Hellblau
+ELECTROMAGNETIC_IMPULSE_COLOR = [(255,0,0), (255,127,0), (255,255,0), (0,255,0), (0,0,255), (75,0,130), (148,0,211)] # Rainbow
 TEXT_COLOR       = (255, 255, 255)
 PANEL_BG         = (20, 20, 40)     # Dunkler Hintergrund für Statistik
 
@@ -52,12 +60,13 @@ class Particle:
     y: float
     dx: float
     dy: float
-    type: str    # "foam", "neutrino", "electron", "magnet_foam"
-    angle: float = 0.0  # Für Magnetlinien: Richtung
+    type: str    # "foam", "neutrino", "electron", "magnetfoam", "electromagnetic_impulse"
+    angle: float = 0.0  # Für Magnetlinien und Impulse: Richtung
     trail: list = field(default_factory=list)
-    trapped_foam: list = field(default_factory=list)  # Nur für magnet_foam: Liste der gefangenen Foam-IDs 
+    trapped_foam: list = field(default_factory=list)  # Nur für magnet_foam: Liste der gefangenen Foam-IDs
     rotation_speed: float = MAGNET_ROTATION_SPEED  # Rotationsgeschwindigkeit für Magnete
-    lifetime: int = 0  # Lebensdauer-Zähler für Magnete
+    lifetime: int = 0  # Lebensdauer-Zähler für Magnete/Impulse
+    initial_angle: float = 0.0 # Initial angle for electromagnetic impulse reflection
 
 def spawn_foam(x, y):
     return Particle(x, y, 0, 0, "foam")
@@ -67,10 +76,17 @@ def spawn_electron(x, y, dx, dy):
 
 def spawn_neutrino(x, y, dx, dy):
     return Particle(x, y, dx, dy, "neutrino")
-    
+
 def spawn_magnetfoam(x, y, angle):
-    return Particle(x, y, 0, 0, "magnetfoam", angle=angle, trapped_foam=[], 
-                   rotation_speed=MAGNET_ROTATION_SPEED, lifetime=100)  # Start-Lebensdauer
+    return Particle(x, y, 0, 0, "magnetfoam", angle=angle, trapped_foam=[],
+                   rotation_speed=MAGNET_ROTATION_SPEED, lifetime=MAGNET_LIFETIME)
+
+def spawn_electromagnetic_impulse(x, y, angle):
+    return Particle(x, y,
+                    ELECTROMAGNETIC_IMPULSE_SPEED * math.cos(angle),
+                    ELECTROMAGNETIC_IMPULSE_SPEED * math.sin(angle),
+                    "electromagnetic_impulse", angle=angle, lifetime=1000, # Long lifetime
+                    initial_angle=angle)
 
 def dist(x1, y1, x2, y2):
     return math.hypot(x1 - x2, y1 - y2)
@@ -109,7 +125,7 @@ for _ in range(INIT_NEUTRINO):
 foam_fusion_buffer = []
 
 # Für Diagramm und Statistiken
-history = {'foam': [], 'neutrino': [], 'electron': [], 'magnetfoam': []}
+history = {'foam': [], 'neutrino': [], 'electron': [], 'magnetfoam': [], 'electromagnetic_impulse': []}
 MAX_HISTORY = 100
 
 running = True
@@ -121,7 +137,7 @@ while running:
 
     # Hintergrund für den gesamten Bildschirm
     screen.fill(BG_COLOR)
-    
+
     # Simulationsbereich (obere Hälfte)
     pygame.draw.rect(screen, BG_COLOR, (0, 0, WIDTH, SIM_HEIGHT))
     pygame.draw.circle(screen, WALL_COLOR, (int(cx), int(cy)), int(bowl_r), 3)
@@ -129,14 +145,19 @@ while running:
 
     new_list = []
     collision_marks = []
-    magnet_lines_to_draw = []
 
     # Zähle Partikel für Statistik
-    counts = {'foam': 0, 'neutrino': 0, 'electron': 0, 'magnetfoam': 0}
-    
+    counts = {'foam': 0, 'neutrino': 0, 'electron': 0, 'magnetfoam': 0, 'electromagnetic_impulse': 0}
+    for p in particles:
+        if p.type in counts:
+            counts[p.type] += 1
+
     # Finde alle Magnete für Abstoßungsberechnung
     all_magnets = [p for p in particles if p.type == "magnetfoam"]
     
+    # Check current counts for the new rule
+    current_special_particles = counts['electron'] + counts['magnetfoam'] + counts['electromagnetic_impulse']
+
     for p in particles:
         r = dist(p.x, p.y, cx, cy)
 
@@ -257,26 +278,27 @@ while running:
                     p.trail.pop(0)
 
             if r >= bowl_r:
-                angle = math.atan2(p.y - cy, p.x - cx)
-                mx = cx + math.cos(angle) * bowl_r
-                my = cy + math.sin(angle) * bowl_r
-                new_list.append(spawn_magnetfoam(mx, my, angle))
-                continue
+                # --- NEUE REGEL: Max Anzahl check for Electron to Magnetfoam ---
+                if current_special_particles < MAX_PARTICLES_SUM:
+                    angle = math.atan2(p.y - cy, p.x - cx)
+                    mx = cx + math.cos(angle) * bowl_r
+                    my = cy + math.sin(angle) * bowl_r
+                    new_list.append(spawn_magnetfoam(mx, my, angle))
+                    current_special_particles += 1 # Increment count immediately
+                continue # Electron is consumed at the rim
 
             new_list.append(p)
 
         elif p.type == "magnetfoam":
-            # Verringere Lebensdauer nur wenn Foams vorhanden sind
-            if p.trapped_foam:
-                p.lifetime -= 1
-            
+            p.lifetime -= 1
+
             # Bewege den Magneten entlang der Atomhülle
             p.angle += p.rotation_speed
-            
+
             # Neue Position auf dem Rand berechnen
             new_x = cx + bowl_r * math.cos(p.angle)
             new_y = cy + bowl_r * math.sin(p.angle)
-            
+
             # Abstoßung von anderen Magneten berechnen
             repulsion_dx, repulsion_dy = 0, 0
             for other in all_magnets:
@@ -287,31 +309,38 @@ while running:
                         angle = math.atan2(p.y - other.y, p.x - other.x)
                         repulsion_dx += math.cos(angle) * force
                         repulsion_dy += math.sin(angle) * force
-            
+
             # Winkel anpassen basierend auf Abstoßung
             if repulsion_dx != 0 or repulsion_dy != 0:
                 repulsion_angle = math.atan2(repulsion_dy, repulsion_dx)
                 # Drehrichtung umkehren wenn nötig für natürlichere Bewegung
                 p.rotation_speed = abs(p.rotation_speed) * (1 if repulsion_angle > p.angle else -1)
-            
+
             # Endgültige Position setzen
             p.x = new_x
             p.y = new_y
-            
+
             # Aktualisiere Position der gefangenen Foams
             for foam_id in p.trapped_foam[:]:
-                for foam in new_list:
+                # Find the actual foam particle to update its position
+                found_foam = False
+                for foam in new_list: # Search in new_list, as foam particles might have been moved there already
                     if id(foam) == foam_id and foam.type == "foam":
                         foam.x = p.x
                         foam.y = p.y
+                        foam.dx = 0 # Ensure it stays put
+                        foam.dy = 0 # Ensure it stays put
+                        found_foam = True
                         break
-            
+                if not found_foam: # If foam somehow disappeared, remove its ID from trapped list
+                    p.trapped_foam.remove(foam_id)
+
             # Gelegentlich ein Foam freigeben (nur wenn Lebensdauer noch nicht abgelaufen)
             if p.trapped_foam and p.lifetime > 0 and random.random() < MAGNET_RELEASE_PROB:
                 # Entferne ein zufälliges Foam aus der Falle
                 foam_id = random.choice(p.trapped_foam)
                 p.trapped_foam.remove(foam_id)
-                
+
                 # Finde das entsprechende Foam-Partikel
                 for foam in new_list:
                     if id(foam) == foam_id and foam.type == "foam":
@@ -321,13 +350,70 @@ while running:
                         foam.dx = math.cos(angle) * speed
                         foam.dy = math.sin(angle) * speed
                         break
-            
-            # Wenn alle Foams freigegeben wurden oder Lebensdauer abgelaufen, verschwindet der Magnet
-            if not p.trapped_foam or p.lifetime <= 0:
+
+            # --- NEUE REGEL: Zerfall des Magneten in einen elektromagnetischen Impuls ---
+            if p.lifetime <= 0:
+                if current_special_particles < MAX_PARTICLES_SUM:
+                    # Transformiere in einen elektromagnetischen Impuls
+                    new_list.append(spawn_electromagnetic_impulse(p.x, p.y, p.angle + math.pi)) # Impulse moves inwards
+                    current_special_particles += 1
                 # Magnet wird nicht wieder hinzugefügt
-                pass
             else:
                 new_list.append(p)
+                
+        elif p.type == "electromagnetic_impulse":
+            p.lifetime -= 1
+            
+            # Bewegung
+            p.x += p.dx
+            p.y += p.dy
+            
+            # Vom Quantenschaum abgelenkt werden
+            p.dx += random.uniform(-ELECTROMAGNETIC_IMPULSE_JIT, ELECTROMAGNETIC_IMPULSE_JIT)
+            p.dy += random.uniform(-ELECTROMAGNETIC_IMPULSE_JIT, ELECTROMAGNETIC_IMPULSE_JIT)
+
+            current_r = dist(p.x, p.y, cx, cy)
+
+            # Reflexion an der Außenhülle (bowl_r)
+            if current_r >= bowl_r:
+                if current_r != 0:
+                    nxr, nyr = (p.x - cx) / current_r, (p.y - cy) / current_r
+                else:
+                    nxr, nyr = 0, 0
+                vdotn = p.dx * nxr + p.dy * nyr
+                p.dx -= 2 * vdotn * nxr
+                p.dy -= 2 * vdotn * nyr
+                p.x = cx + nxr * (bowl_r - 1) # Reposition slightly inside
+                p.y = cy + nyr * (bowl_r - 1)
+                
+                # Adjust angle for trail
+                p.angle = math.atan2(p.dy, p.dx)
+
+
+            # Reflexion am Drain (DRAIN_RADIUS)
+            elif current_r <= DRAIN_RADIUS:
+                if current_r != 0:
+                    nxr, nyr = (p.x - cx) / current_r, (p.y - cy) / current_r
+                else:
+                    nxr, nyr = 0, 0
+                vdotn = p.dx * nxr + p.dy * nyr
+                p.dx -= 2 * vdotn * nxr
+                p.dy -= 2 * vdotn * nyr
+                p.x = cx + nxr * (DRAIN_RADIUS + 1) # Reposition slightly outside
+                p.y = cy + nyr * (DRAIN_RADIUS + 1)
+                
+                # Adjust angle for trail
+                p.angle = math.atan2(p.dy, p.dx)
+
+            if p.trail is not None:
+                p.trail.append((p.x, p.y))
+                if len(p.trail) > 20: # Longer trail for visual effect
+                    p.trail.pop(0)
+            
+            # --- NEUE REGEL: Impulse verschwinden, wenn Lebensdauer abgelaufen ---
+            if p.lifetime > 0:
+                new_list.append(p)
+
 
     # --- 2. Neutrino→Elektron-Fusion im Drain ---
     drain_neutrinos = [p for p in new_list if p.type == "neutrino" and dist(p.x, p.y, cx, cy) <= DRAIN_RADIUS]
@@ -340,17 +426,21 @@ while running:
         p = drain_neutrinos[i]
         cluster = [q for q in drain_neutrinos if dist(p.x, p.y, q.x, q.y) < 7 and drain_neutrinos.index(q) not in used]
         if len(cluster) >= NEUTRINOTOELECTRON_THRESHOLD:
-            mx = sum(q.x for q in cluster[:NEUTRINOTOELECTRON_THRESHOLD]) / NEUTRINOTOELECTRON_THRESHOLD
-            my = sum(q.y for q in cluster[:NEUTRINOTOELECTRON_THRESHOLD]) / NEUTRINOTOELECTRON_THRESHOLD
-            mdx = sum(q.dx for q in cluster[:NEUTRINOTOELECTRON_THRESHOLD]) / NEUTRINOTOELECTRON_THRESHOLD
-            mdy = sum(q.dy for q in cluster[:NEUTRINOTOELECTRON_THRESHOLD]) / NEUTRINOTOELECTRON_THRESHOLD
-            remove_ids = set(id(q) for q in cluster[:NEUTRINOTOELECTRON_THRESHOLD])
-            new_list = [part for part in new_list if not (part.type == "neutrino" and id(part) in remove_ids)]
-            used |= set(drain_neutrinos.index(q) for q in cluster[:NEUTRINOTOELECTRON_THRESHOLD])
-            new_list.append(spawn_electron(mx, my, mdx, mdy))
+            # --- NEUE REGEL: Max Anzahl check for Neutrino to Electron ---
+            if current_special_particles < MAX_PARTICLES_SUM:
+                mx = sum(q.x for q in cluster[:NEUTRINOTOELECTRON_THRESHOLD]) / NEUTRINOTOELECTRON_THRESHOLD
+                my = sum(q.y for q in cluster[:NEUTRINOTOELECTRON_THRESHOLD]) / NEUTRINOTOELECTRON_THRESHOLD
+                mdx = sum(q.dx for q in cluster[:NEUTRINOTOELECTRON_THRESHOLD]) / NEUTRINOTOELECTRON_THRESHOLD
+                mdy = sum(q.dy for q in cluster[:NEUTRINOTOELECTRON_THRESHOLD]) / NEUTRINOTOELECTRON_THRESHOLD
+                remove_ids = set(id(q) for q in cluster[:NEUTRINOTOELECTRON_THRESHOLD])
+                new_list = [part for part in new_list if not (part.type == "neutrino" and id(part) in remove_ids)]
+                used |= set(drain_neutrinos.index(q) for q in cluster[:NEUTRINOTOELECTRON_THRESHOLD])
+                new_list.append(spawn_electron(mx, my, mdx, mdy))
+                current_special_particles += 1 # Increment count immediately
         i += 1
 
-    # Aktualisiere Partikelzähler
+    # Aktualisiere Partikelzähler nach allen Spawns/removals
+    counts = {'foam': 0, 'neutrino': 0, 'electron': 0, 'magnetfoam': 0, 'electromagnetic_impulse': 0}
     for p in new_list:
         if p.type in counts:
             counts[p.type] += 1
@@ -365,42 +455,56 @@ while running:
     for p in new_list:
         r = dist(p.x, p.y, cx, cy)
         cf = min(1.0, max(0.0, r / bowl_r))
+        
+        radius = 0 # Default to 0, overridden by type
+        color = (0,0,0) # Default color, overridden by type
+
         if p.type == "foam":
             rc = int(255 * cf)
             gc = int(255 * (1 - cf) * 0.5)
             bc = int(255 * (1 - cf))
             radius = 3
+            color = (rc, gc, bc)
         elif p.type == "neutrino":
             rc = int(255 * cf)
             gc = 0
             bc = int(255 * (1 - cf))
             radius = 2
+            color = (rc, gc, bc)
         elif p.type == "electron":
             rc = 0
             gc = 220
             bc = 255
             radius = 7
+            color = (rc, gc, bc)
         elif p.type == "magnetfoam":
             # Größe basierend auf Anzahl gefangener Foams und Lebensdauer
             size_factor = min(len(p.trapped_foam), 10)
-            lifetime_factor = min(p.lifetime / 100, 1.0)  # Normalisiert auf 0-1
+            lifetime_factor = min(p.lifetime / MAGNET_LIFETIME, 1.0) # Normalisiert auf 0-1
             radius = 7 + size_factor * lifetime_factor
             # Farbe wird mit Lebensdauer schwächer
             rc = int(80 * lifetime_factor)
             gc = int(220 * lifetime_factor)
             bc = int(255 * lifetime_factor)
+            color = (rc, gc, bc)
+        elif p.type == "electromagnetic_impulse":
+            radius = 5
+            # Regenbogenfarben basierend auf Zeit oder Position
+            color_index = int((pygame.time.get_ticks() / 100) % len(ELECTROMAGNETIC_IMPULSE_COLOR))
+            color = ELECTROMAGNETIC_IMPULSE_COLOR[color_index]
         else:
-            rc = 255
-            gc = 255
-            bc = 255
+            color = (255, 255, 255) # Default white
             radius = 2
 
         if p.trail:
             for i, (tx, ty) in enumerate(p.trail):
                 alpha = int(255 * (1 - i / len(p.trail)))
                 if alpha > 0:
-                    pygame.draw.circle(screen, (rc, gc, bc, alpha), (int(tx), int(ty)), radius)
-        pygame.draw.circle(screen, (rc, gc, bc), (int(p.x), int(p.y)), radius)
+                    trail_color = list(color) # Copy color to modify alpha
+                    if len(trail_color) == 3: # Add alpha if not present
+                        trail_color.append(alpha)
+                    pygame.draw.circle(screen, tuple(trail_color), (int(tx), int(ty)), radius)
+        pygame.draw.circle(screen, color, (int(p.x), int(p.y)), radius)
 
     for x, y, rad in collision_marks[:]:
         pygame.draw.circle(screen, YELLOW_COLOR, (int(x), int(y)), rad)
@@ -411,101 +515,108 @@ while running:
     # === Statistik-Anzeige (unterer Bereich) ===
     # Hintergrund für Statistikbereich
     pygame.draw.rect(screen, PANEL_BG, (0, SIM_HEIGHT, WIDTH, HEIGHT - SIM_HEIGHT))
-    
+
     # Partikelzahlen anzeigen (links)
     text_y = SIM_HEIGHT + 40
     particle_types = [
         ("Foam", counts['foam'], FOAM_COLOR),
         ("Neutrino", counts['neutrino'], NEUTRINO_COLOR),
         ("Electron", counts['electron'], ELECTRON_COLOR),
-        ("Magnet", counts['magnetfoam'], MAGNET_DIAG_COLOR)
+        ("Magnet", counts['magnetfoam'], MAGNET_DIAG_COLOR),
+        ("Impuls", counts['electromagnetic_impulse'], ELECTROMAGNETIC_IMPULSE_COLOR[0]) # Use first rainbow color for legend
     ]
-    
+
     # Zeichne Titel
     title = font_large.render("PARTIKEL-STATISTIK", True, TEXT_COLOR)
     screen.blit(title, (40, text_y))
     text_y += 70
-    
+
     # Zeichne Partikelzahlen in einer Tabelle (mit größerer Schrift)
     for label, count, color in particle_types:
         # Beschriftung
         label_surface = font_medium.render(f"{label}:", True, color)
         screen.blit(label_surface, (60, text_y))
-        
+
         # Wert
         count_surface = font_medium.render(f"{count}", True, TEXT_COLOR)
         screen.blit(count_surface, (300, text_y))
-        
+
         text_y += 70
+        
+    # Display the MAX_PARTICLES_SUM rule
+    rule_text = font_medium.render(f"Max E + M + I: {MAX_PARTICLES_SUM}", True, TEXT_COLOR)
+    screen.blit(rule_text, (60, text_y + 30))
+
 
     # Quadratisches Diagramm zeichnen (rechts ausgerichtet)
     diagram_size = 600
     diagram_x = WIDTH - diagram_size - 40  # 40px Abstand vom rechten Rand
     diagram_y = SIM_HEIGHT + 200
     diagram_rect = pygame.Rect(diagram_x, diagram_y, diagram_size, diagram_size)
-    
+
     # Diagramm-Hintergrund
     pygame.draw.rect(screen, BG_COLOR, diagram_rect)
     pygame.draw.rect(screen, TEXT_COLOR, diagram_rect, 2)
-    
+
     # Diagramm-Titel
     title = font_large.render("PARTIKEL-ENTWICKLUNG", True, TEXT_COLOR)
     screen.blit(title, (diagram_x, diagram_y - 50))
-    
+
     # Finde den maximalen Wert für die Skalierung
     max_val = 1
     for values in history.values():
         if values:
             max_val = max(max_val, max(values))
-    
+
     # Zeichne Gitternetz
     grid_color = (80, 80, 100)
     for i in range(1, 5):
         y_pos = diagram_y + diagram_size - i * diagram_size/4
-        pygame.draw.line(screen, grid_color, 
-                         (diagram_x, y_pos), 
+        pygame.draw.line(screen, grid_color,
+                         (diagram_x, y_pos),
                          (diagram_x + diagram_size, y_pos), 1)
         val = int(i * max_val / 4)
         grid_text = font_small.render(str(val), True, grid_color)
         screen.blit(grid_text, (diagram_x - 60, y_pos - 15))
-    
+
     # Zeichne Partikelkurven
     colors = {
         'foam': FOAM_COLOR,
         'neutrino': NEUTRINO_COLOR,
         'electron': ELECTRON_COLOR,
-        'magnetfoam': MAGNET_DIAG_COLOR
+        'magnetfoam': MAGNET_DIAG_COLOR,
+        'electromagnetic_impulse': ELECTROMAGNETIC_IMPULSE_COLOR[0] # Use first rainbow color for graph
     }
-    
+
     # Legende oben rechts im Diagramm
     legend_x = diagram_x + diagram_size - 200
     legend_y = diagram_y + 30
-    
+
     for ptype, values in history.items():
         if len(values) < 2:
             continue
-            
+
         points = []
         for i, value in enumerate(values):
             if max_val > 0:
                 y_pos = diagram_y + diagram_size - (value / max_val) * diagram_size
             else:
                 y_pos = diagram_y + diagram_size
-                
+
             x_pos = diagram_x + (i / (len(values)-1)) * diagram_size
             points.append((x_pos, y_pos))
-        
+
         if len(points) > 1:
             pygame.draw.lines(screen, colors[ptype], False, points, 3)
-            
+
             # Zeichne Legende (rechts oben im Diagramm)
-            pygame.draw.line(screen, colors[ptype], 
-                            (legend_x, legend_y), 
+            pygame.draw.line(screen, colors[ptype],
+                            (legend_x, legend_y),
                             (legend_x + 50, legend_y), 3)
-            legend_text = font_small.render(ptype.capitalize(), True, colors[ptype])
+            legend_text = font_small.render(ptype.replace('_', ' ').capitalize(), True, colors[ptype])
             screen.blit(legend_text, (legend_x + 60, legend_y - 12))
             legend_y += 35
-    
+
     pygame.display.flip()
 
 pygame.quit()
